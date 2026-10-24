@@ -81,6 +81,13 @@ Then click:
 - Revision questions
 - Explain concept
 
+## Project flow
+This app is intentionally simple:
+1. Paste notes into the textarea
+2. Select a local Ollama model
+3. Click a study action
+4. Review the generated summary or explanation
+
 ## Screenshots
 Capture screenshots of:
 1. The app landing page with the note box
@@ -88,6 +95,11 @@ Capture screenshots of:
 3. The concept explanation output
 
 These screenshots can be added to the repository or used in the project submission and demo.
+
+## Notes for Hacktoberfest
+- The app does not use a paid API
+- All AI generation happens locally through Ollama
+- The project is designed to be beginner-friendly and easy to run on modest laptops
 
 ## GitHub and challenge workflow
 1. Initialize a Git repository
