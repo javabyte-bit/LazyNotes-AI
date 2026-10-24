@@ -6,9 +6,41 @@ import requests
 import streamlit as st
 from streamlit.components.v1 import html as components_html
 
+# AI_MODE="local" keeps the original local Ollama setup.
+# For the public Streamlit demo, set AI_MODE="cloud" and configure
+# OLLAMA_API_KEY in Streamlit Secrets (never commit the key to GitHub).
+def get_config_value(name: str, default: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        # Local mode should still work when no Streamlit secrets file exists.
+        return default
+
+
+AI_MODE = get_config_value("AI_MODE", "local").lower()
+if AI_MODE not in {"local", "cloud"}:
+    AI_MODE = "local"
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 LIST_MODELS_URL = os.getenv("OLLAMA_MODELS_URL", "http://localhost:11434/api/tags")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_CLOUD_URL = get_config_value("OLLAMA_CLOUD_URL", "https://ollama.com/api/chat")
+CLOUD_MODEL = get_config_value("OLLAMA_CLOUD_MODEL", "gemma4:cloud")
+
+
+def get_ollama_api_key() -> str:
+    """Read the hosted Ollama key from environment variables or Streamlit Secrets."""
+    key = os.getenv("OLLAMA_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("OLLAMA_API_KEY", "")).strip()
+    except Exception:
+        # Local mode should still work when no Streamlit secrets file exists.
+        return ""
 
 DARK_THEME = {
     "bg": "#151515",
@@ -106,6 +138,12 @@ def persist_theme_choice() -> None:
 
 
 def get_ollama_status() -> tuple[bool, list[str]]:
+    """Return connection status and selectable models for the configured AI mode."""
+    if AI_MODE == "cloud":
+        if get_ollama_api_key():
+            return True, [CLOUD_MODEL]
+        return False, []
+
     try:
         response = requests.get(LIST_MODELS_URL, timeout=20)
         response.raise_for_status()
@@ -121,6 +159,9 @@ def get_available_models() -> list[str]:
 
 
 def ollama_is_local() -> bool:
+    """Whether note processing is configured to use the local Ollama server."""
+    if AI_MODE == "cloud":
+        return False
     hostname = urlparse(OLLAMA_URL).hostname
     if hostname == "localhost":
         return True
@@ -133,6 +174,16 @@ def ollama_is_local() -> bool:
 def ensure_model_available(model_name: str) -> str:
     if not model_name.strip():
         raise ValueError("Please choose an Ollama model before generating output.")
+
+    if AI_MODE == "cloud":
+        if not get_ollama_api_key():
+            raise ValueError(
+                "The hosted Ollama API key is not configured. Add OLLAMA_API_KEY "
+                "to Streamlit Cloud → App settings → Secrets, then restart the app."
+            )
+        if model_name.strip() != CLOUD_MODEL:
+            raise ValueError(f"The configured hosted model is '{CLOUD_MODEL}'.")
+        return model_name.strip()
 
     available_models = get_available_models()
     if available_models and model_name not in available_models:
@@ -151,20 +202,43 @@ def ensure_model_available(model_name: str) -> str:
 
 def call_ollama(prompt: str, model: str = DEFAULT_MODEL, temperature: float = 0.3) -> str:
     model = ensure_model_available(model)
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": 400,
-        },
-    }
 
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=180)
+        if AI_MODE == "cloud":
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": 400,
+                },
+            }
+            response = requests.post(
+                OLLAMA_CLOUD_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {get_ollama_api_key()}"},
+                timeout=180,
+            )
+        else:
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": 400,
+                },
+            }
+            response = requests.post(OLLAMA_URL, json=payload, timeout=180)
+
         response.raise_for_status()
     except requests.RequestException as exc:
+        if AI_MODE == "cloud":
+            raise ValueError(
+                "Could not reach Ollama's hosted API. Check the API key, model name, "
+                "and remaining Ollama usage, then try again."
+            ) from exc
         raise ValueError(
             "The local Ollama server is not responding. Start Ollama and try again."
         ) from exc
@@ -174,7 +248,14 @@ def call_ollama(prompt: str, model: str = DEFAULT_MODEL, temperature: float = 0.
     except ValueError as exc:
         raise ValueError("The model returned an invalid response. Please try again.") from exc
 
-    return data.get("response", "").strip()
+    if AI_MODE == "cloud":
+        result = data.get("message", {}).get("content", "")
+    else:
+        result = data.get("response", "")
+
+    if not isinstance(result, str) or not result.strip():
+        raise ValueError("The model returned an empty response. Please try again.")
+    return result.strip()
 
 
 def summarize_notes(notes: str, model: str = DEFAULT_MODEL) -> str:
@@ -1404,7 +1485,20 @@ with col_settings:
         )
         st.divider()
         st.markdown("**AI Setup**")
-        if ollama_connected and available_models:
+        if AI_MODE == "cloud":
+            if ollama_connected and available_models:
+                st.success("Ollama hosted API configured")
+                model_name = CLOUD_MODEL
+                st.caption(f"Hosted model: `{CLOUD_MODEL}`")
+                st.session_state["model_name"] = model_name
+            else:
+                st.error(
+                    "Hosted Ollama API key is missing. Add `OLLAMA_API_KEY` in "
+                    "Streamlit Cloud → App settings → Secrets."
+                )
+                model_name = CLOUD_MODEL
+                st.session_state["model_name"] = model_name
+        elif ollama_connected and available_models:
             st.success(f"Connected · {len(available_models)} model(s) available")
             current_index = available_models.index(model_name) if model_name in available_models else 0
             model_name = st.selectbox(
